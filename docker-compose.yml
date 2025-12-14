@@ -1,0 +1,176 @@
+x-customizable-image: &customizable_image
+  image: ${CUSTOM_IMAGE:-frappe/erpnext}:${CUSTOM_TAG:-$ERPNEXT_VERSION}
+  pull_policy: ${PULL_POLICY:-always}
+  restart: ${RESTART_POLICY:-unless-stopped}
+
+x-depends-on-configurator: &depends_on_configurator
+  depends_on:
+    configurator:
+      condition: service_completed_successfully
+
+x-backend-defaults: &backend_defaults
+  <<: [*depends_on_configurator, *customizable_image]
+  volumes:
+    - sites:/home/frappe/frappe-bench/sites
+
+services:
+  configurator:
+    <<: *backend_defaults
+    platform: linux/amd64
+    entrypoint:
+      - bash
+      - -c
+    command:
+      - >
+        ls -1 apps > sites/apps.txt;
+        bench set-config -g db_host $$DB_HOST;
+        bench set-config -gp db_port $$DB_PORT;
+        bench set-config -g redis_cache "redis://$$REDIS_CACHE";
+        bench set-config -g redis_queue "redis://$$REDIS_QUEUE";
+        bench set-config -g redis_socketio "redis://$$REDIS_QUEUE";
+        bench set-config -gp socketio_port $$SOCKETIO_PORT;
+    environment:
+      DB_HOST: ${DB_HOST:-}
+      DB_PORT: ${DB_PORT:-}
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      SOCKETIO_PORT: 9000
+    depends_on:
+      - redis-cache
+      - redis-queue
+    restart: on-failure
+    networks:
+      - bench-network
+      - mariadb-network
+
+  backend:
+    <<: *backend_defaults
+    platform: linux/amd64
+    networks:
+      - mariadb-network
+      - bench-network
+
+  frontend:
+    <<: *customizable_image
+    platform: linux/amd64
+    command:
+      - nginx-entrypoint.sh
+    environment:
+      BACKEND: backend:8000
+      SOCKETIO: websocket:9000
+      FRAPPE_SITE_NAME_HEADER: ${FRAPPE_SITE_NAME_HEADER:-$$host}
+      UPSTREAM_REAL_IP_ADDRESS: ${UPSTREAM_REAL_IP_ADDRESS:-127.0.0.1}
+      UPSTREAM_REAL_IP_HEADER: ${UPSTREAM_REAL_IP_HEADER:-X-Forwarded-For}
+      UPSTREAM_REAL_IP_RECURSIVE: ${UPSTREAM_REAL_IP_RECURSIVE:-off}
+      PROXY_READ_TIMEOUT: ${PROXY_READ_TIMEOUT:-120}
+      CLIENT_MAX_BODY_SIZE: ${CLIENT_MAX_BODY_SIZE:-50m}
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+    depends_on:
+      - backend
+      - websocket
+    networks:
+      - traefik-public
+      - bench-network
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.http.services.${ROUTER?ROUTER not set}.loadbalancer.server.port=8080
+      - traefik.http.routers.${ROUTER}-http.service=${ROUTER}
+      - traefik.http.routers.${ROUTER}-http.entrypoints=http
+      - traefik.http.routers.${ROUTER}-http.rule=Host(${SITES?SITES not set})
+      - traefik.http.routers.${ROUTER}-http.middlewares=https-redirect
+      - traefik.http.routers.${ROUTER}-https.rule=Host(${SITES?SITES not set})
+      - traefik.http.routers.${ROUTER}-https.entrypoints=https
+      - traefik.http.routers.${ROUTER}-https.tls=true
+      - traefik.http.routers.${ROUTER}-https.service=${ROUTER}
+      - traefik.http.routers.${ROUTER}-https.tls.certresolver=le
+
+  websocket:
+    <<: [*depends_on_configurator, *customizable_image]
+    platform: linux/amd64
+    command:
+      - node
+      - /home/frappe/frappe-bench/apps/frappe/socketio.js
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+    networks:
+      - bench-network
+      - mariadb-network
+
+  queue-short:
+    <<: *backend_defaults
+    platform: linux/amd64
+    command: bench worker --queue short,default
+    networks:
+      - bench-network
+      - mariadb-network
+
+  queue-long:
+    <<: *backend_defaults
+    platform: linux/amd64
+    command: bench worker --queue long,default,short
+    networks:
+      - bench-network
+      - mariadb-network
+
+  scheduler:
+    <<: *backend_defaults
+    platform: linux/amd64
+    command: bench schedule
+    networks:
+      - bench-network
+      - mariadb-network
+
+  redis-cache:
+    image: redis:6.2-alpine
+    restart: unless-stopped
+    networks:
+      - bench-network
+      - mariadb-network
+
+  redis-queue:
+    image: redis:6.2-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-queue-data:/data
+    networks:
+      - bench-network
+      - mariadb-network
+
+  database:
+    container_name: mariadb-database
+    image: mariadb:11.8
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      start_period: 5s
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --skip-character-set-client-handshake
+      - --skip-innodb-read-only-compressed
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-changeit}
+      MARIADB_AUTO_UPGRADE: 1
+    volumes:
+      - db-data:/var/lib/mysql
+    networks:
+      - mariadb-network
+
+# ERPNext requires local assets access (Frappe does not)
+volumes:
+  sites:
+  redis-queue-data:
+  db-data:
+
+networks:
+  traefik-public:
+    external: true
+  mariadb-network:
+    name: mariadb-network
+  bench-network:
+    name: ${ROUTER}
