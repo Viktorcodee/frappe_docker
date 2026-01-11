@@ -13,7 +13,7 @@ Once completed, chose one of the following two sections for next steps.
 
 ### Try in Play With Docker
 
-To play in an already set up sandbox, in your browser, click the button below:
+To play in an already set up sandbox, in your browser, click the button below:.
 
 <a href="https://labs.play-with-docker.com/?stack=https://raw.githubusercontent.com/frappe/frappe_docker/main/pwd.yml">
   <img src="https://raw.githubusercontent.com/play-with-docker/stacks/master/assets/images/button.png" alt="Try in PWD"/>
